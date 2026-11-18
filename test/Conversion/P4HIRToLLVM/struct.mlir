@@ -240,6 +240,39 @@ module {
 
 // -----
 
+// Stores through packed fields use byte alignment. The local array uses natural alignment.
+
+// CHECK-LABEL: @alignment(
+// CHECK:         %[[LOCAL:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i16>
+// CHECK:         %[[A:.*]] = llvm.getelementptr inbounds %{{.*}}[0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<packed (i8, array<2 x i16>)>
+// CHECK-NEXT:    %[[E:.*]] = llvm.getelementptr inbounds %[[A]][0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.array<2 x i16>
+// CHECK-NEXT:    llvm.store %{{.*}}, %[[E]] {alignment = 1 : i64} : i16, !llvm.ptr
+// CHECK-NEXT:    %[[F:.*]] = llvm.getelementptr inbounds %[[LOCAL]][0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.array<2 x i16>
+// CHECK-NEXT:    llvm.store %{{.*}}, %[[F]] : i16, !llvm.ptr
+
+!b8i = !p4hir.bit<8>
+!b16i = !p4hir.bit<16>
+!b32i = !p4hir.bit<32>
+!arr = !p4hir.array<2 x !b16i>
+!s = !p4hir.struct<"s", x: !b8i, a: !arr>
+#inout = #p4hir<dir inout>
+
+module {
+  p4hir.func @alignment(%s : !p4hir.ref<!s> {p4hir.dir = #inout, p4hir.param_name = "s"},
+                        %v : !b16i) {
+    %arr = p4hir.variable ["arr", init] : <!arr>
+    %c1 = p4hir.const #p4hir.int<1> : !b32i
+    %a = p4hir.struct_field_ref %s["a"] : <!s>
+    %e = p4hir.array_element_ref %a[%c1] : !p4hir.ref<!arr>, !b32i
+    p4hir.assign %v, %e : <!b16i>
+    %f = p4hir.array_element_ref %arr[%c1] : !p4hir.ref<!arr>, !b32i
+    p4hir.assign %v, %f : <!b16i>
+    p4hir.return
+  }
+}
+
+// -----
+
 // Whole structs are loaded, stored and allocated like scalars.
 
 // CHECK-LABEL: @copy(
