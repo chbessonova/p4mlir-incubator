@@ -205,3 +205,75 @@ module {
     p4hir.return
   }
 }
+
+// -----
+
+// Read and write struct fields in place.
+
+// CHECK-LABEL: @fields(
+// CHECK-DAG:     %[[O:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.ptr
+// CHECK-DAG:     %[[V:.*]] = builtin.unrealized_conversion_cast %arg1 : !{{.*}} to i8
+// CHECK:         %[[S:.*]] = llvm.getelementptr inbounds %[[O]][0, 1] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK-NEXT:    %[[X:.*]] = llvm.getelementptr inbounds %[[S]][0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    llvm.store %[[V]], %[[X]] {alignment = 1 : i64} : i8, !llvm.ptr
+// CHECK-NEXT:    %[[A:.*]] = llvm.getelementptr inbounds %[[O]][0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK-NEXT:    %[[R:.*]] = llvm.load %[[A]] {alignment = 1 : i64} : !llvm.ptr -> i32
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[R]] : i32 to !{{.*}}
+
+!b8i = !p4hir.bit<8>
+!b32i = !p4hir.bit<32>
+!inner = !p4hir.struct<"inner", x: !b8i, y: !p4hir.bool>
+!outer = !p4hir.struct<"outer", a: !b32i, s: !inner>
+#inout = #p4hir<dir inout>
+
+module {
+  p4hir.func @fields(%o : !p4hir.ref<!outer> {p4hir.dir = #inout, p4hir.param_name = "o"},
+                     %v : !b8i) -> !b32i {
+    %s = p4hir.struct_field_ref %o["s"] : <!outer>
+    %x = p4hir.struct_field_ref %s["x"] : <!inner>
+    p4hir.assign %v, %x : <!b8i>
+    %a = p4hir.struct_field_ref %o["a"] : <!outer>
+    %r = p4hir.read %a : <!b32i>
+    p4hir.return %r : !b32i
+  }
+}
+
+// -----
+
+// Whole structs are loaded, stored and allocated like scalars.
+
+// CHECK-LABEL: @copy(
+// CHECK-DAG:     %[[DST:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.ptr
+// CHECK-DAG:     %[[SRC:.*]] = builtin.unrealized_conversion_cast %arg1 : !{{.*}} to !llvm.ptr
+// CHECK:         %[[V:.*]] = llvm.load %[[SRC]] : !llvm.ptr -> !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    llvm.store %[[V]], %[[DST]] : !llvm.struct<packed (i8, i1)>, !llvm.ptr
+
+// CHECK-LABEL: @local(
+// CHECK-DAG:     %[[S:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.struct<packed (i8, i1)>
+// CHECK:         %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[VAR:.*]] = llvm.alloca %[[ONE]] x !llvm.struct<packed (i8, i1)> : (i64) -> !llvm.ptr
+// CHECK-NEXT:    llvm.store %[[S]], %[[VAR]] : !llvm.struct<packed (i8, i1)>, !llvm.ptr
+// CHECK-NEXT:    %[[X:.*]] = llvm.getelementptr inbounds %[[VAR]][0, 0] : (!llvm.ptr) -> !llvm.ptr, !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[R:.*]] = llvm.load %[[X]] {alignment = 1 : i64} : !llvm.ptr -> i8
+
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"s", x: !b8i, y: !p4hir.bool>
+#in = #p4hir<dir in>
+#out = #p4hir<dir out>
+
+module {
+  p4hir.func @copy(%dst : !p4hir.ref<!s> {p4hir.dir = #out, p4hir.param_name = "dst"},
+                   %src : !p4hir.ref<!s> {p4hir.dir = #in, p4hir.param_name = "src"}) {
+    %v = p4hir.read %src : <!s>
+    p4hir.assign %v, %dst : <!s>
+    p4hir.return
+  }
+
+  p4hir.func @local(%s : !s) -> !b8i {
+    %var = p4hir.variable ["var", init] : <!s>
+    p4hir.assign %s, %var : <!s>
+    %x = p4hir.struct_field_ref %var["x"] : <!s>
+    %r = p4hir.read %x : <!b8i>
+    p4hir.return %r : !b8i
+  }
+}
