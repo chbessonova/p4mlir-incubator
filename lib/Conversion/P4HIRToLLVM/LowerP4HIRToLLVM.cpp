@@ -529,6 +529,11 @@ struct LifetimeEndOpConversion : public ConvertOpToLLVMPattern<P4HIR::LifetimeEn
     }
 };
 
+// Accesses to packed struct fields use byte alignment.
+unsigned getAccessAlignment(Value ref) {
+    return ref.getDefiningOp<P4HIR::StructFieldRefOp>() ? 1 : 0;
+}
+
 struct ReadOpConversion : public ConvertOpToLLVMPattern<P4HIR::ReadOp> {
     using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -537,7 +542,8 @@ struct ReadOpConversion : public ConvertOpToLLVMPattern<P4HIR::ReadOp> {
         auto resultType = getTypeConverter()->convertType(op.getType());
         if (!resultType) return rewriter.notifyMatchFailure(op, "unsupported result type");
 
-        rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, resultType, adaptor.getRef());
+        rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, resultType, adaptor.getRef(),
+                                                  getAccessAlignment(op.getRef()));
         return success();
     }
 };
@@ -547,7 +553,25 @@ struct AssignOpConversion : public ConvertOpToLLVMPattern<P4HIR::AssignOp> {
 
     LogicalResult matchAndRewrite(P4HIR::AssignOp op, OpAdaptor adaptor,
                                   ConversionPatternRewriter &rewriter) const override {
-        rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getValue(), adaptor.getRef());
+        rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getValue(), adaptor.getRef(),
+                                                   getAccessAlignment(op.getRef()));
+        return success();
+    }
+};
+
+struct StructFieldRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::StructFieldRefOp> {
+    using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+    LogicalResult matchAndRewrite(P4HIR::StructFieldRefOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        auto objectType = cast<P4HIR::ReferenceType>(op.getInput().getType()).getObjectType();
+        auto structType = getTypeConverter()->convertType(objectType);
+        if (!structType) return rewriter.notifyMatchFailure(op, "unsupported struct type");
+
+        auto fieldIndex = static_cast<int32_t>(op.getFieldIndex());
+        rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, getPtrType(), structType, adaptor.getInput(),
+                                                 ArrayRef<LLVM::GEPArg>{0, fieldIndex},
+                                                 LLVM::GEPNoWrapFlags::inbounds);
         return success();
     }
 };
@@ -668,4 +692,5 @@ void P4::P4MLIR::populateP4HIRToLLVMConversionPatterns(LLVMTypeConverter &conver
     patterns.add<AggregateOpConversion<P4HIR::StructOp>, AggregateOpConversion<P4HIR::ArrayOp>,
                  StructExtractOpConversion, ArrayGetOpConversion>(converter);
     patterns.add<VariableOpConversion, LifetimeStartOpConversion>(converter, initializeVariables);
+    patterns.add<StructFieldRefOpConversion>(converter);
 }

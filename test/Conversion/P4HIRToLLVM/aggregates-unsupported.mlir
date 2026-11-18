@@ -120,3 +120,22 @@ module {
     p4hir.return
   }
 }
+
+// -----
+
+// References into headers are left unconverted.
+
+// CHECK-LABEL: @refs(
+// CHECK:         p4hir.struct_field_ref %{{.*}}["h"] : <!with_header>
+
+!b8i = !p4hir.bit<8>
+!validity_bit = !p4hir.validity.bit
+!h = !p4hir.header<"h", a: !b8i, __valid: !validity_bit>
+!with_header = !p4hir.struct<"with_header", x: !b8i, h: !h>
+
+module {
+  p4hir.func @refs(%s : !p4hir.ref<!with_header>) {
+    %h = p4hir.struct_field_ref %s["h"] : <!with_header>
+    p4hir.return
+  }
+}
