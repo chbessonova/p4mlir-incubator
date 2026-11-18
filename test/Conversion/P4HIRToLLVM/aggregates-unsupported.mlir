@@ -123,19 +123,35 @@ module {
 
 // -----
 
-// References into headers are left unconverted.
+// References into headers stay in P4HIR. So do potentially out-of-bounds
+// array references and their accesses outside a flattened function CFG.
 
 // CHECK-LABEL: @refs(
 // CHECK:         p4hir.struct_field_ref %{{.*}}["h"] : <!with_header>
+// CHECK-LABEL: p4hir.control @C(
+// CHECK:         %[[E:.*]] = p4hir.array_element_ref %{{.*}}[%{{.*}}] : !p4hir.ref<!{{.*}}>, !b32i
+// CHECK-NEXT:    p4hir.read %[[E]] : <!b8i>
 
 !b8i = !p4hir.bit<8>
+!b32i = !p4hir.bit<32>
 !validity_bit = !p4hir.validity.bit
 !h = !p4hir.header<"h", a: !b8i, __valid: !validity_bit>
 !with_header = !p4hir.struct<"with_header", x: !b8i, h: !h>
+!arr = !p4hir.array<2 x !b8i>
+#inout = #p4hir<dir inout>
+#in = #p4hir<dir in>
 
 module {
   p4hir.func @refs(%s : !p4hir.ref<!with_header>) {
     %h = p4hir.struct_field_ref %s["h"] : <!with_header>
     p4hir.return
+  }
+
+  p4hir.control @C(%arr: !p4hir.ref<!arr> {p4hir.dir = #inout, p4hir.param_name = "arr"},
+                   %i: !b32i {p4hir.dir = #in, p4hir.param_name = "i"})() {
+    p4hir.control_apply {
+      %e = p4hir.array_element_ref %arr[%i] : !p4hir.ref<!arr>, !b32i
+      %r = p4hir.read %e : <!b8i>
+    }
   }
 }
