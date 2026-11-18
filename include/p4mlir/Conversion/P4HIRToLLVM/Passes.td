@@ -22,10 +22,18 @@ def LowerP4HIRToLLVM : Pass<"lower-p4hir-to-llvm", "mlir::ModuleOp"> {
     beforehand (see `p4hir-remove-aliases`, `p4hir-enum-elimination`,
     `p4hir-ser-enum-elimination` passes).
 
+    Before lowering, flatten structured control flow with `p4hir-flatten-cfg`
+    and expand slice reads and writes with `p4hir-expand-slice-read-assign`.
+
     P4 leaves the value of an uninitialized variable unspecified. Like mem2reg on
     P4HIR, the lowering stores the default value of its type into variables without
     an initializer. With `initialize-variables=false`, such variables are left
     uninitialized instead, i.e. undefined in LLVM.
+
+    Struct field and array element references lower to GEPs. Potentially
+    out-of-bounds array references support reads and writes, including through
+    further projections. Out-of-bounds reads return zero and writes have no
+    effect. Other uses, such as calls, leave the reference chain unconverted.
 
     Variables are allocated where they are declared. Run `p4hir-hoist-variables`
     before flattening the CFG and lowering to LLVM to place stack allocations in

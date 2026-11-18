@@ -6,6 +6,7 @@
 // order to propagate pragma further on
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -240,13 +241,15 @@ struct CondBrOpConversion : public ConvertOpToLLVMPattern<P4HIR::CondBrOp> {
     }
 };
 
-Value createZExtOrTrunc(Value value, IntegerType resultType, Location loc,
-                        ConversionPatternRewriter &rewriter) {
+Value createIntCast(Value value, IntegerType resultType, Location loc, OpBuilder &builder,
+                    bool isSigned) {
     auto valueType = cast<IntegerType>(value.getType());
-    if (valueType.getWidth() < resultType.getWidth())
-        return LLVM::ZExtOp::create(rewriter, loc, resultType, value);
+    if (valueType.getWidth() < resultType.getWidth()) {
+        if (isSigned) return LLVM::SExtOp::create(builder, loc, resultType, value);
+        return LLVM::ZExtOp::create(builder, loc, resultType, value);
+    }
     if (valueType.getWidth() > resultType.getWidth())
-        return LLVM::TruncOp::create(rewriter, loc, resultType, value);
+        return LLVM::TruncOp::create(builder, loc, resultType, value);
     return value;
 }
 
@@ -268,8 +271,8 @@ struct ConcatOpConversion : public ConvertOpToLLVMPattern<P4HIR::ConcatOp> {
         // Concatenation operates on the bit patterns of its operands, regardless of
         // their signedness. Zero-extend both operands so that sign extension cannot
         // introduce bits into the other half of the result.
-        Value high = createZExtOrTrunc(adaptor.getLhs(), resultType, loc, rewriter);
-        Value low = createZExtOrTrunc(adaptor.getRhs(), resultType, loc, rewriter);
+        Value high = createIntCast(adaptor.getLhs(), resultType, loc, rewriter, /*isSigned=*/false);
+        Value low = createIntCast(adaptor.getRhs(), resultType, loc, rewriter, /*isSigned=*/false);
         // The shift amount is the width of the low half, which is always smaller
         // than the result width.
         Value shift = LLVM::ConstantOp::create(rewriter, loc, resultType, lowWidth);
@@ -296,7 +299,7 @@ struct SliceOpConversion : public ConvertOpToLLVMPattern<P4HIR::SliceOp> {
             Value shift = LLVM::ConstantOp::create(rewriter, loc, inputType, lowBit);
             value = LLVM::LShrOp::create(rewriter, loc, value, shift);
         }
-        rewriter.replaceOp(op, createZExtOrTrunc(value, resultType, loc, rewriter));
+        rewriter.replaceOp(op, createIntCast(value, resultType, loc, rewriter, /*isSigned=*/false));
         return success();
     }
 };
@@ -407,6 +410,26 @@ std::optional<uint64_t> getConstantIndexInBounds(Value index, uint64_t size) {
     if (!matchPattern(index, ::m_ConstantInt(&value))) return std::nullopt;
     if (value.isNegative() || value.uge(size)) return std::nullopt;
     return value.getZExtValue();
+}
+
+bool isSignedIndex(Value index) {
+    auto bitsType = dyn_cast<P4HIR::BitsType>(index.getType());
+    return bitsType && bitsType.isSigned();
+}
+
+// Returns the converted value of `index` as an LLVM integer. A bit<0> index converts to the empty
+// struct, but always denotes 0.
+Value getIntegerIndex(OpBuilder &builder, Location loc, Value index, Value convertedIndex,
+                      IntegerType indexType) {
+    if (P4HIR::isZeroWidth(index.getType()))
+        return LLVM::ConstantOp::create(builder, loc, indexType, 0);
+    return convertedIndex;
+}
+
+LLVM::GEPArg getConstantGEPIndex(OpBuilder &builder, Location loc, Type indexType, uint64_t index) {
+    // GEP immediates use a signed field. Larger indices use SSA operands.
+    if (llvm::isUInt<LLVM::kGEPConstantBitWidth - 1>(index)) return static_cast<int32_t>(index);
+    return LLVM::ConstantOp::create(builder, loc, indexType, index).getResult();
 }
 
 struct ArrayGetOpConversion : public ConvertOpToLLVMPattern<P4HIR::ArrayGetOp> {
@@ -529,9 +552,148 @@ struct LifetimeEndOpConversion : public ConvertOpToLLVMPattern<P4HIR::LifetimeEn
     }
 };
 
-// Accesses to packed struct fields use byte alignment.
+// Accesses through packed struct fields use byte alignment, including array elements.
 unsigned getAccessAlignment(Value ref) {
+    while (auto elementRef = ref.getDefiningOp<P4HIR::ArrayElementRefOp>())
+        ref = elementRef.getInput();
     return ref.getDefiningOp<P4HIR::StructFieldRefOp>() ? 1 : 0;
+}
+
+// Guarded accesses split blocks, which is only possible in a flattened function CFG.
+bool isDirectlyInFunctionBody(Operation *op) {
+    return isa<P4HIR::FuncOp>(op->getBlock()->getParentOp());
+}
+
+// Returns a use of `ref` that a bounds check cannot guard, or null if there is none.
+Operation *findUnguardableUse(Value ref) {
+    for (Operation *user : ref.getUsers()) {
+        // Ignore temporary conversion casts; the original users determine whether
+        // accesses can be guarded.
+        if (isa<UnrealizedConversionCastOp>(user)) continue;
+        if (isa<P4HIR::ReadOp, P4HIR::AssignOp>(user)) {
+            if (!isDirectlyInFunctionBody(user)) return user;
+        } else if (isa<P4HIR::StructFieldRefOp, P4HIR::ArrayElementRefOp>(user)) {
+            if (Operation *use = findUnguardableUse(user->getResult(0))) return use;
+        } else {
+            return user;
+        }
+    }
+    return nullptr;
+}
+
+using ArrayBoundsCheck = std::pair<Value, uint64_t>;  // Index and array size.
+
+FailureOr<SmallVector<ArrayBoundsCheck>> collectArrayBoundsChecks(Value ref, Operation *op,
+                                                                  RewriterBase &rewriter) {
+    SmallVector<ArrayBoundsCheck> checks;
+
+    while (Operation *def = ref.getDefiningOp()) {
+        if (auto field = dyn_cast<P4HIR::StructFieldRefOp>(def)) {
+            ref = field.getInput();
+            continue;
+        }
+        auto element = dyn_cast<P4HIR::ArrayElementRefOp>(def);
+        if (!element) break;
+
+        ref = element.getInput();
+        auto index = element.getIndex();
+        auto array =
+            cast<P4HIR::ArrayType>(cast<P4HIR::ReferenceType>(ref.getType()).getObjectType());
+        if (getConstantIndexInBounds(index, array.getSize())) continue;
+
+        if (!isa<P4HIR::BitsType>(index.getType())) {
+            return rewriter.notifyMatchFailure(op, [&](Diagnostic &diag) {
+                diag << "array index that may be out of bounds has type " << index.getType()
+                     << ", which has no LLVM integer type";
+            });
+        }
+        if (!isDirectlyInFunctionBody(element)) {
+            return rewriter.notifyMatchFailure(
+                op,
+                "array element reference that may be out of bounds is not directly in a "
+                "p4hir.func body");
+        }
+        if (Operation *use = findUnguardableUse(element.getResult())) {
+            return rewriter.notifyMatchFailure(op, [&](Diagnostic &diag) {
+                diag << "array element reference that may be out of bounds has a use that "
+                        "cannot be guarded: '"
+                     << use->getName() << "'";
+                if (isa<P4HIR::ReadOp, P4HIR::AssignOp>(use))
+                    diag << " not directly in a p4hir.func body";
+            });
+        }
+
+        checks.push_back({index, array.getSize()});
+    }
+    return checks;
+}
+
+// Returns the condition under which all array projections in the reference chain of `ref` are in
+// bounds, or null if none of them may be out of bounds:
+//   %inBounds_k = llvm.icmp "ult" %index_k, %size_k
+//   %condition = llvm.and %inBounds_1, ..., %inBounds_n
+FailureOr<Value> createAccessCondition(Operation *op, Value ref,
+                                       ConversionPatternRewriter &rewriter, IntegerType indexType) {
+    auto checks = collectArrayBoundsChecks(ref, op, rewriter);
+    if (failed(checks)) return failure();
+
+    auto loc = op->getLoc();
+    Value condition;
+    for (auto [sourceIndex, size] : *checks) {
+        Value index = getIntegerIndex(rewriter, loc, sourceIndex,
+                                      rewriter.getRemappedValue(sourceIndex), indexType);
+        if (cast<IntegerType>(index.getType()).getWidth() < indexType.getWidth())
+            index = createIntCast(index, indexType, loc, rewriter, isSignedIndex(sourceIndex));
+        Value sizeValue = LLVM::ConstantOp::create(rewriter, loc, index.getType(), size);
+        Value inBounds =
+            LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult, index, sizeValue);
+        condition = condition ? LLVM::AndOp::create(rewriter, loc, condition, inBounds).getResult()
+                              : inBounds;
+    }
+    return condition;
+}
+
+// Lowers a read or a write through a reference.
+// `emitAccess` creates the load or the store and returns the loaded value, or null for a store.
+// A null `condition` means that the access needs no guard. Otherwise the access only executes
+// if `condition` holds, and a read that does not execute yields zero.
+//
+// Guarded read:
+//     %zero = llvm.mlir.zero : resultType
+//     llvm.cond_br %condition, ^load, ^cont(%zero)
+//   ^load:
+//     %loaded = llvm.load %ptr
+//     llvm.br ^cont(%loaded)
+//   ^cont(%result):  // %result replaces the read
+//
+// Guarded write:
+//     llvm.cond_br %condition, ^store, ^cont
+//   ^store:
+//     llvm.store %value, %ptr
+//     llvm.br ^cont
+//   ^cont:
+Value createGuardedAccess(ConversionPatternRewriter &rewriter, Operation *op, Value condition,
+                          function_ref<Value()> emitAccess) {
+    if (!condition) return emitAccess();
+
+    auto loc = op->getLoc();
+    Block *head = op->getBlock();
+    Block *continuation = rewriter.splitBlock(head, op->getIterator());
+    Block *access = rewriter.createBlock(continuation);
+    Value loaded = emitAccess();
+    SmallVector<Value, 1> accessValues, skipValues;
+    Value result;
+    if (loaded) {
+        accessValues.push_back(loaded);
+        result = continuation->addArgument(loaded.getType(), loc);
+    }
+    LLVM::BrOp::create(rewriter, loc, accessValues, continuation);
+
+    rewriter.setInsertionPointToEnd(head);
+    if (loaded) skipValues.push_back(LLVM::ZeroOp::create(rewriter, loc, loaded.getType()));
+    LLVM::CondBrOp::create(rewriter, loc, condition, access, ValueRange{}, continuation,
+                           skipValues);
+    return result;
 }
 
 struct ReadOpConversion : public ConvertOpToLLVMPattern<P4HIR::ReadOp> {
@@ -542,8 +704,15 @@ struct ReadOpConversion : public ConvertOpToLLVMPattern<P4HIR::ReadOp> {
         auto resultType = getTypeConverter()->convertType(op.getType());
         if (!resultType) return rewriter.notifyMatchFailure(op, "unsupported result type");
 
-        rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, resultType, adaptor.getRef(),
-                                                  getAccessAlignment(op.getRef()));
+        auto condition =
+            createAccessCondition(op, op.getRef(), rewriter, cast<IntegerType>(getIndexType()));
+        if (failed(condition)) return failure();
+
+        Value result = createGuardedAccess(rewriter, op, *condition, [&]() -> Value {
+            return LLVM::LoadOp::create(rewriter, op.getLoc(), resultType, adaptor.getRef(),
+                                        getAccessAlignment(op.getRef()));
+        });
+        rewriter.replaceOp(op, result);
         return success();
     }
 };
@@ -553,8 +722,16 @@ struct AssignOpConversion : public ConvertOpToLLVMPattern<P4HIR::AssignOp> {
 
     LogicalResult matchAndRewrite(P4HIR::AssignOp op, OpAdaptor adaptor,
                                   ConversionPatternRewriter &rewriter) const override {
-        rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getValue(), adaptor.getRef(),
-                                                   getAccessAlignment(op.getRef()));
+        auto condition =
+            createAccessCondition(op, op.getRef(), rewriter, cast<IntegerType>(getIndexType()));
+        if (failed(condition)) return failure();
+
+        createGuardedAccess(rewriter, op, *condition, [&]() -> Value {
+            LLVM::StoreOp::create(rewriter, op.getLoc(), adaptor.getValue(), adaptor.getRef(),
+                                  getAccessAlignment(op.getRef()));
+            return {};
+        });
+        rewriter.eraseOp(op);
         return success();
     }
 };
@@ -564,6 +741,9 @@ struct StructFieldRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::StructF
 
     LogicalResult matchAndRewrite(P4HIR::StructFieldRefOp op, OpAdaptor adaptor,
                                   ConversionPatternRewriter &rewriter) const override {
+        // Leave the reference chain in P4HIR if one of its accesses cannot be guarded.
+        if (failed(collectArrayBoundsChecks(op.getResult(), op, rewriter))) return failure();
+
         auto objectType = cast<P4HIR::ReferenceType>(op.getInput().getType()).getObjectType();
         auto structType = getTypeConverter()->convertType(objectType);
         if (!structType) return rewriter.notifyMatchFailure(op, "unsupported struct type");
@@ -572,6 +752,42 @@ struct StructFieldRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::StructF
         rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, getPtrType(), structType, adaptor.getInput(),
                                                  ArrayRef<LLVM::GEPArg>{0, fieldIndex},
                                                  LLVM::GEPNoWrapFlags::inbounds);
+        return success();
+    }
+};
+
+struct ArrayElementRefOpConversion : public ConvertOpToLLVMPattern<P4HIR::ArrayElementRefOp> {
+    using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+    LogicalResult matchAndRewrite(P4HIR::ArrayElementRefOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        // Leave the reference chain in P4HIR if one of its accesses cannot be guarded.
+        if (failed(collectArrayBoundsChecks(op.getResult(), op, rewriter))) return failure();
+
+        auto objectType = cast<P4HIR::ReferenceType>(op.getInput().getType()).getObjectType();
+        auto arrayType =
+            dyn_cast_if_present<LLVM::LLVMArrayType>(getTypeConverter()->convertType(objectType));
+        if (!arrayType) return rewriter.notifyMatchFailure(op, "unsupported array type");
+
+        auto replaceWithGEP = [&](LLVM::GEPArg index) {
+            rewriter.replaceOpWithNewOp<LLVM::GEPOp>(
+                op, getPtrType(), arrayType, adaptor.getInput(), ArrayRef<LLVM::GEPArg>{0, index},
+                LLVM::GEPNoWrapFlags::inbounds);
+        };
+
+        auto loc = op.getLoc();
+        if (auto index = getConstantIndexInBounds(op.getIndex(), arrayType.getNumElements())) {
+            replaceWithGEP(getConstantGEPIndex(rewriter, loc, getIndexType(), *index));
+            return success();
+        }
+
+        auto indexType = cast<IntegerType>(getIndexType());
+        Value index = getIntegerIndex(rewriter, loc, op.getIndex(), adaptor.getIndex(), indexType);
+        index = createIntCast(index, indexType, loc, rewriter, isSignedIndex(op.getIndex()));
+
+        // An out-of-bounds GEP may produce poison. The reference can only feed
+        // further projections and accesses guarded by the original indices.
+        replaceWithGEP(index);
         return success();
     }
 };
@@ -692,5 +908,5 @@ void P4::P4MLIR::populateP4HIRToLLVMConversionPatterns(LLVMTypeConverter &conver
     patterns.add<AggregateOpConversion<P4HIR::StructOp>, AggregateOpConversion<P4HIR::ArrayOp>,
                  StructExtractOpConversion, ArrayGetOpConversion>(converter);
     patterns.add<VariableOpConversion, LifetimeStartOpConversion>(converter, initializeVariables);
-    patterns.add<StructFieldRefOpConversion>(converter);
+    patterns.add<StructFieldRefOpConversion, ArrayElementRefOpConversion>(converter);
 }

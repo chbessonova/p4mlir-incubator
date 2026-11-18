@@ -2,7 +2,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// RUN: p4mlir-opt %s --lower-p4hir-to-llvm -split-input-file | FileCheck %s
+// RUN: p4mlir-opt %s --lower-p4hir-to-llvm -split-input-file \
+// RUN:   | FileCheck %s --implicit-check-not=llvm.alloca --implicit-check-not=llvm.getelementptr \
+// RUN:       --implicit-check-not=llvm.load --implicit-check-not=llvm.store
 
 // Headers, header unions and header stacks are not lowered yet, and neither are
 // structs and arrays containing them or other types without an LLVM counterpart:
@@ -123,7 +125,7 @@ module {
 
 // -----
 
-// References into headers are left unconverted.
+// References into headers stay in P4HIR.
 
 // CHECK-LABEL: @refs(
 // CHECK:         p4hir.struct_field_ref %{{.*}}["h"] : <!with_header>
@@ -136,6 +138,57 @@ module {
 module {
   p4hir.func @refs(%s : !p4hir.ref<!with_header>) {
     %h = p4hir.struct_field_ref %s["h"] : <!with_header>
+    p4hir.return
+  }
+}
+
+// -----
+
+// A call cannot carry the bounds check. The whole reference chain stays in P4HIR.
+
+// CHECK-LABEL: @escape(
+// CHECK:         p4hir.array_element_ref
+// CHECK:         p4hir.call @sink
+// CHECK:         p4hir.read
+// CHECK-LABEL: @projected_escape(
+// CHECK:         p4hir.array_element_ref
+// CHECK:         p4hir.struct_field_ref
+// CHECK:         p4hir.call @sink
+// CHECK:         p4hir.read
+// CHECK-LABEL: @oob_escape(
+// CHECK:         p4hir.array_element_ref
+// CHECK:         p4hir.call @sink
+
+!b8i = !p4hir.bit<8>
+!b32i = !p4hir.bit<32>
+!s = !p4hir.struct<"s", x: !b8i>
+!arr = !p4hir.array<4 x !b8i>
+!structs = !p4hir.array<2 x !s>
+
+module {
+  p4hir.func @escape(%a : !p4hir.ref<!arr>, %i : !b32i) -> !b8i {
+    %e = p4hir.array_element_ref %a[%i] : !p4hir.ref<!arr>, !b32i
+    p4hir.call @sink (%e) : (!p4hir.ref<!b8i>) -> ()
+    %r = p4hir.read %e : <!b8i>
+    p4hir.return %r : !b8i
+  }
+
+  p4hir.func @projected_escape(%a : !p4hir.ref<!structs>, %i : !b32i) -> !s {
+    %e = p4hir.array_element_ref %a[%i] : !p4hir.ref<!structs>, !b32i
+    %f = p4hir.struct_field_ref %e["x"] : <!s>
+    p4hir.call @sink (%f) : (!p4hir.ref<!b8i>) -> ()
+    %r = p4hir.read %e : <!s>
+    p4hir.return %r : !s
+  }
+
+  p4hir.func @oob_escape(%a : !p4hir.ref<!arr>) {
+    %c4 = p4hir.const #p4hir.int<4> : !b8i
+    %e = p4hir.array_element_ref %a[%c4] : !p4hir.ref<!arr>, !b8i
+    p4hir.call @sink (%e) : (!p4hir.ref<!b8i>) -> ()
+    p4hir.return
+  }
+
+  p4hir.func @sink(%r : !p4hir.ref<!b8i>) {
     p4hir.return
   }
 }
