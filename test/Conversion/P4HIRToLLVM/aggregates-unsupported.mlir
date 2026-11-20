@@ -144,6 +144,39 @@ module {
     }
   }
 }
+
+// -----
+
+// Equality of headers, and so of structs containing them, depends on validity and
+// is left unconverted.
+
+// CHECK-LABEL: @eq(
+// CHECK:         p4hir.cmp(eq, %{{.*}} : !with_header, %{{.*}} : !with_header)
+
+!b8i = !p4hir.bit<8>
+!validity_bit = !p4hir.validity.bit
+!h = !p4hir.header<"h", a: !b8i, __valid: !validity_bit>
+!with_header = !p4hir.struct<"with_header", x: !b8i, h: !h>
+
+module {
+  p4hir.func @eq(%a : !with_header, %b : !with_header) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !with_header, %b : !with_header)
+    p4hir.return %eq : !p4hir.bool
+  }
+}
+// -----
+
+// The indexable interface cannot represent a field count of 2^32.
+// CHECK-LABEL: @oversized_equality(
+// CHECK-NOT: llvm.extractvalue
+// CHECK: p4hir.cmp(eq,
+!large = !p4hir.array<4294967296 x !p4hir.bit<0>>
+module {
+  p4hir.func @oversized_equality(%a: !large, %b: !large) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !large, %b : !large)
+    p4hir.return %eq : !p4hir.bool
+  }
+}
 // -----
 
 // A dynamic index remains unsupported even for an empty array. A valid position
