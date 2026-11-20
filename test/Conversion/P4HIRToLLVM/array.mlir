@@ -302,3 +302,29 @@ module {
     p4hir.return %ne : !p4hir.bool
   }
 }
+
+// -----
+
+// Array variables declared without an initializer take the default value of
+// their type as a whole, where their lifetime starts if it is marked.
+
+// CHECK-LABEL: @uninitialized(
+// CHECK-NEXT:    %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[VAR:.*]] = llvm.alloca %[[ONE]] x !llvm.array<2 x struct<packed (i8, i1)>> : (i64) -> !llvm.ptr
+// CHECK-NEXT:    llvm.intr.lifetime.start %[[VAR]] : !llvm.ptr
+// CHECK-NEXT:    %[[ZERO:.*]] = llvm.mlir.zero : !llvm.array<2 x struct<packed (i8, i1)>>
+// CHECK-NEXT:    llvm.store %[[ZERO]], %[[VAR]] : !llvm.array<2 x struct<packed (i8, i1)>>, !llvm.ptr
+
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"s", x: !b8i, y: !p4hir.bool>
+!arr = !p4hir.array<2 x !s>
+
+module {
+  p4hir.func @uninitialized() -> !arr {
+    %var = p4hir.variable ["var"] : <!arr>
+    p4hir.lifetime_start %var : <!arr>
+    %v = p4hir.read %var : <!arr>
+    p4hir.lifetime_end %var : <!arr>
+    p4hir.return %v : !arr
+  }
+}

@@ -419,3 +419,25 @@ module {
     p4hir.return %eq : !p4hir.bool
   }
 }
+
+// -----
+
+// Struct variables declared without an initializer take the default value of
+// their type as a whole.
+
+// CHECK-LABEL: @uninitialized(
+// CHECK-NEXT:    %[[ONE:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK-NEXT:    %[[VAR:.*]] = llvm.alloca %[[ONE]] x !llvm.struct<packed (i8, i1)> : (i64) -> !llvm.ptr
+// CHECK-NEXT:    %[[ZERO:.*]] = llvm.mlir.zero : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    llvm.store %[[ZERO]], %[[VAR]] : !llvm.struct<packed (i8, i1)>, !llvm.ptr
+
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"s", x: !b8i, y: !p4hir.bool>
+
+module {
+  p4hir.func @uninitialized() -> !s {
+    %var = p4hir.variable ["var"] : <!s>
+    %v = p4hir.read %var : <!s>
+    p4hir.return %v : !s
+  }
+}
