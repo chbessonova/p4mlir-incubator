@@ -41,30 +41,19 @@ module {
 
 // -----
 
-// `llvm.extractvalue` needs a constant position within the bounds of the array:
-// reads at a dynamic index and at a constant one out of bounds, possibly negative,
-// are left unconverted.
+// Dynamic array value indexing remains unsupported.
 
 // CHECK-LABEL: @get(
 // CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !b32i
-// CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !b32i
-// CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !i8i
 
 !b8i = !p4hir.bit<8>
 !b32i = !p4hir.bit<32>
-!i8i = !p4hir.int<8>
 !arr = !p4hir.array<2 x !b8i>
 
 module {
   p4hir.func @get(%arr : !arr, %i : !b32i) -> !b8i {
     %dyn = p4hir.array_get %arr[%i] : !arr, !b32i
-    %c2 = p4hir.const #p4hir.int<2> : !b32i
-    %oob = p4hir.array_get %arr[%c2] : !arr, !b32i
-    %cm1 = p4hir.const #p4hir.int<-1> : !i8i
-    %neg = p4hir.array_get %arr[%cm1] : !arr, !i8i
-    %s0 = p4hir.binop(add, %dyn, %oob) : !b8i
-    %s1 = p4hir.binop(add, %s0, %neg) : !b8i
-    p4hir.return %s1 : !b8i
+    p4hir.return %dyn : !b8i
   }
 }
 

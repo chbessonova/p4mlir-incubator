@@ -450,9 +450,21 @@ struct ArrayGetOpConversion : public ConvertOpToLLVMPattern<P4HIR::ArrayGetOp> {
         auto arrayType = dyn_cast<LLVM::LLVMArrayType>(adaptor.getInput().getType());
         if (!arrayType) return rewriter.notifyMatchFailure(op, "unsupported array type");
 
-        // `llvm.extractvalue` only takes constant positions within the bounds of the array.
+        // Dynamic value indexing is unsupported.
+        llvm::APSInt value;
+        if (!matchPattern(op.getIndex(), ::m_ConstantInt(&value)))
+            return rewriter.notifyMatchFailure(op, "expected a constant index");
+
         auto index = getConstantIndexInBounds(op.getIndex(), arrayType.getNumElements());
-        if (!index) return rewriter.notifyMatchFailure(op, "expected a constant in-bounds index");
+        if (!index) {
+            // P4 leaves OOB reads unspecified. Choose zero, also for empty arrays.
+            rewriter.replaceOpWithNewOp<LLVM::ZeroOp>(op, arrayType.getElementType());
+            return success();
+        }
+        // LLVM's extractvalue positions are unsigned 32-bit integers.
+        if (!llvm::isUInt<32>(*index))
+            return rewriter.notifyMatchFailure(op,
+                                               "index exceeds LLVM extractvalue position range");
 
         rewriter.replaceOpWithNewOp<LLVM::ExtractValueOp>(op, adaptor.getInput(),
                                                           static_cast<int64_t>(*index));
