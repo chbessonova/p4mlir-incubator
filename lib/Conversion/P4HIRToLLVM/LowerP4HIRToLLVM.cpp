@@ -422,6 +422,67 @@ struct StructExtractOpConversion : public ConvertOpToLLVMPattern<P4HIR::StructEx
     }
 };
 
+// Returns whether the lowered values `lhs` and `rhs` of the P4 type `type` are equal. Structs are
+// equal if all their fields are, arrays if all their elements are.
+Value createEqual(OpBuilder &builder, Location loc, Type type, Value lhs, Value rhs) {
+    if (auto aliasType = dyn_cast<P4HIR::AliasType>(type)) type = aliasType.getCanonicalType();
+    if (P4HIR::isZeroWidth(type))
+        return LLVM::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+
+    SmallVector<Type> elementTypes;
+    if (auto structType = dyn_cast<P4HIR::StructType>(type)) {
+        for (const auto &field : structType.getElements()) elementTypes.push_back(field.type);
+    } else if (auto arrayType = dyn_cast<P4HIR::ArrayType>(type)) {
+        elementTypes.assign(arrayType.getSize(), arrayType.getElementType());
+    } else if (isa<P4HIR::BitsType, P4HIR::BoolType>(type)) {
+        return LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::eq, lhs, rhs);
+    } else {
+        return {};
+    }
+
+    Value equal;
+    for (auto [index, elementType] : llvm::enumerate(elementTypes)) {
+        auto position = static_cast<int64_t>(index);
+        Value lhsElement = LLVM::ExtractValueOp::create(builder, loc, lhs, position);
+        Value rhsElement = LLVM::ExtractValueOp::create(builder, loc, rhs, position);
+        Value elementEqual = createEqual(builder, loc, elementType, lhsElement, rhsElement);
+        if (!elementEqual) return {};
+        equal = equal ? LLVM::AndOp::create(builder, loc, equal, elementEqual) : elementEqual;
+    }
+    // Values of empty structs and arrays are all equal.
+    if (!equal) equal = LLVM::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+    return equal;
+}
+
+// Only equality is defined on structs and arrays.
+struct AggregateCmpOpConversion : public ConvertOpToLLVMPattern<P4HIR::CmpOp> {
+    using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+    LogicalResult matchAndRewrite(P4HIR::CmpOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        auto type = op.getLhs().getType();
+        if (auto aliasType = dyn_cast<P4HIR::AliasType>(type)) type = aliasType.getCanonicalType();
+        if (!isa<P4HIR::StructType, P4HIR::ArrayType>(type))
+            return rewriter.notifyMatchFailure(op, "not a struct or array comparison");
+        if (!getTypeConverter()->convertType(type))
+            return rewriter.notifyMatchFailure(op, "unsupported cmp operand type");
+
+        auto kind = op.getKind();
+        if (kind != P4HIR::CmpOpKind::Eq && kind != P4HIR::CmpOpKind::Ne)
+            return rewriter.notifyMatchFailure(op, "only equality is defined on aggregates");
+
+        auto loc = op.getLoc();
+        auto equal = createEqual(rewriter, loc, type, adaptor.getLhs(), adaptor.getRhs());
+        if (!equal) return rewriter.notifyMatchFailure(op, "unsupported cmp operand type");
+        if (kind == P4HIR::CmpOpKind::Ne) {
+            Value one = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI1Type(), 1);
+            equal = LLVM::XOrOp::create(rewriter, loc, equal, one);
+        }
+        rewriter.replaceOp(op, equal);
+        return success();
+    }
+};
+
 // Returns the value of `index` if it is a constant within the bounds of an array of `size`
 // elements.
 std::optional<uint64_t> getConstantIndexInBounds(Value index, uint64_t size) {
@@ -912,7 +973,8 @@ void P4::P4MLIR::populateP4HIRToLLVMConversionPatterns(LLVMTypeConverter &conver
                  CastOpConversion, ReadOpConversion, AssignOpConversion, LifetimeEndOpConversion>(
         converter);
     patterns.add<AggregateOpConversion<P4HIR::StructOp>, AggregateOpConversion<P4HIR::ArrayOp>,
-                 StructExtractOpConversion, ArrayGetOpConversion>(converter);
+                 AggregateCmpOpConversion, StructExtractOpConversion, ArrayGetOpConversion>(
+        converter);
     patterns.add<VariableOpConversion, LifetimeStartOpConversion>(converter, initializeVariables);
     patterns.add<StructFieldRefOpConversion, ArrayElementRefOpConversion>(converter);
 }

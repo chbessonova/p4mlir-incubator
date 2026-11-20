@@ -144,3 +144,23 @@ module {
     }
   }
 }
+
+// -----
+
+// Equality of headers, and so of structs containing them, depends on validity and
+// is left unconverted.
+
+// CHECK-LABEL: @eq(
+// CHECK:         p4hir.cmp(eq, %{{.*}} : !with_header, %{{.*}} : !with_header)
+
+!b8i = !p4hir.bit<8>
+!validity_bit = !p4hir.validity.bit
+!h = !p4hir.header<"h", a: !b8i, __valid: !validity_bit>
+!with_header = !p4hir.struct<"with_header", x: !b8i, h: !h>
+
+module {
+  p4hir.func @eq(%a : !with_header, %b : !with_header) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !with_header, %b : !with_header)
+    p4hir.return %eq : !p4hir.bool
+  }
+}

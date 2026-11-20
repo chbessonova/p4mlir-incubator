@@ -259,3 +259,46 @@ module {
     p4hir.return %r : !b8i
   }
 }
+
+// -----
+
+// Arrays are equal if all their elements are, arrays of structs included.
+
+// CHECK-LABEL: @eq(
+// CHECK-DAG:     %[[A:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.array<2 x struct<packed (i8)>>
+// CHECK-DAG:     %[[B:.*]] = builtin.unrealized_conversion_cast %arg1 : !{{.*}} to !llvm.array<2 x struct<packed (i8)>>
+// CHECK:         %[[A0:.*]] = llvm.extractvalue %[[A]][0] : !llvm.array<2 x struct<packed (i8)>>
+// CHECK-NEXT:    %[[B0:.*]] = llvm.extractvalue %[[B]][0] : !llvm.array<2 x struct<packed (i8)>>
+// CHECK-NEXT:    %[[A0X:.*]] = llvm.extractvalue %[[A0]][0] : !llvm.struct<packed (i8)>
+// CHECK-NEXT:    %[[B0X:.*]] = llvm.extractvalue %[[B0]][0] : !llvm.struct<packed (i8)>
+// CHECK-NEXT:    %[[EQ0:.*]] = llvm.icmp "eq" %[[A0X]], %[[B0X]] : i8
+// CHECK-NEXT:    %[[A1:.*]] = llvm.extractvalue %[[A]][1] : !llvm.array<2 x struct<packed (i8)>>
+// CHECK-NEXT:    %[[B1:.*]] = llvm.extractvalue %[[B]][1] : !llvm.array<2 x struct<packed (i8)>>
+// CHECK-NEXT:    %[[A1X:.*]] = llvm.extractvalue %[[A1]][0] : !llvm.struct<packed (i8)>
+// CHECK-NEXT:    %[[B1X:.*]] = llvm.extractvalue %[[B1]][0] : !llvm.struct<packed (i8)>
+// CHECK-NEXT:    %[[EQ1:.*]] = llvm.icmp "eq" %[[A1X]], %[[B1X]] : i8
+// CHECK-NEXT:    %[[EQ:.*]] = llvm.and %[[EQ0]], %[[EQ1]] : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[EQ]] : i1 to !{{.*}}
+
+// CHECK-LABEL: @ne_empty(
+// CHECK-NEXT:    %[[TRUE:.*]] = llvm.mlir.constant(true) : i1
+// CHECK-NEXT:    %[[TRUE2:.*]] = llvm.mlir.constant(true) : i1
+// CHECK-NEXT:    %[[NE:.*]] = llvm.xor %[[TRUE]], %[[TRUE2]] : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[NE]] : i1 to !{{.*}}
+
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"s", x: !b8i>
+!arr = !p4hir.array<2 x !s>
+!empty = !p4hir.array<0 x !b8i>
+
+module {
+  p4hir.func @eq(%a : !arr, %b : !arr) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !arr, %b : !arr)
+    p4hir.return %eq : !p4hir.bool
+  }
+
+  p4hir.func @ne_empty(%a : !empty, %b : !empty) -> !p4hir.bool {
+    %ne = p4hir.cmp(ne, %a : !empty, %b : !empty)
+    p4hir.return %ne : !p4hir.bool
+  }
+}
