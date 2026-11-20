@@ -30,6 +30,10 @@ def LowerP4HIRToLLVM : Pass<"lower-p4hir-to-llvm", "mlir::ModuleOp"> {
     an initializer. With `initialize-variables=false`, such variables are left
     uninitialized instead, i.e. undefined in LLVM.
 
+    Array value extraction supports constant indices only. In-bounds positions
+    lower to extractvalue (within LLVM's 32-bit position range); out-of-bounds
+    constants return zero, including for empty arrays.
+
     Struct field and array element references lower to GEPs. Potentially
     out-of-bounds array references support reads and writes, including through
     further projections. Out-of-bounds reads return zero and writes have no
