@@ -18,6 +18,7 @@
 #include "p4mlir/Dialect/P4HIR/Matchers.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Dialect.h"  // IWYU pragma: keep (required for Passes.cpp.inc)
 #include "p4mlir/Dialect/P4HIR/P4HIR_Ops.h"
+#include "p4mlir/Dialect/P4HIR/P4HIR_TypeInterfaces.h"
 #include "p4mlir/Dialect/P4HIR/P4HIR_Types.h"
 
 #define DEBUG_TYPE "p4hir-to-llvm"
@@ -399,6 +400,67 @@ struct StructExtractOpConversion : public ConvertOpToLLVMPattern<P4HIR::StructEx
 
         rewriter.replaceOpWithNewOp<LLVM::ExtractValueOp>(op, adaptor.getInput(),
                                                           op.getFieldIndex());
+        return success();
+    }
+};
+
+bool isSupportedEqualityType(Type type) {
+    if (auto arrayType = dyn_cast<P4HIR::ArrayType>(type)) {
+        // IndexableTypeInterface uses a 32-bit field count.
+        return llvm::isUInt<32>(arrayType.getSize()) &&
+               isSupportedEqualityType(arrayType.getElementType());
+    }
+    if (auto structType = dyn_cast<P4HIR::StructType>(type))
+        return llvm::all_of(structType.getElements(),
+                            [](const auto &field) { return isSupportedEqualityType(field.type); });
+    return isa<P4HIR::BitsType, P4HIR::BoolType>(type);
+}
+
+// Returns whether the lowered values `lhs` and `rhs` of the P4 type `type` are equal. Structs are
+// equal if all their fields are, arrays if all their elements are.
+Value createEqual(OpBuilder &builder, Location loc, Type type, Value lhs, Value rhs) {
+    if (P4HIR::isZeroWidth(type))
+        return LLVM::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+
+    if (isa<P4HIR::BitsType, P4HIR::BoolType>(type))
+        return LLVM::ICmpOp::create(builder, loc, LLVM::ICmpPredicate::eq, lhs, rhs);
+
+    Value equal;
+    for (auto field : cast<P4HIR::IndexableTypeInterface>(type).getFields()) {
+        auto position = static_cast<int64_t>(field.getIndex());
+        Value lhsElement = LLVM::ExtractValueOp::create(builder, loc, lhs, position);
+        Value rhsElement = LLVM::ExtractValueOp::create(builder, loc, rhs, position);
+        Value elementEqual = createEqual(builder, loc, field.getType(), lhsElement, rhsElement);
+        equal = equal ? LLVM::AndOp::create(builder, loc, equal, elementEqual) : elementEqual;
+    }
+    // Values of empty structs and arrays are all equal.
+    if (!equal) equal = LLVM::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+    return equal;
+}
+
+// Only equality is defined on structs and arrays.
+struct AggregateCmpOpConversion : public ConvertOpToLLVMPattern<P4HIR::CmpOp> {
+    using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+    LogicalResult matchAndRewrite(P4HIR::CmpOp op, OpAdaptor adaptor,
+                                  ConversionPatternRewriter &rewriter) const override {
+        auto type = op.getLhs().getType();
+        if (!isa<P4HIR::StructType, P4HIR::ArrayType>(type))
+            return rewriter.notifyMatchFailure(op, "not a struct or array comparison");
+        if (!isSupportedEqualityType(type) || !getTypeConverter()->convertType(type))
+            return rewriter.notifyMatchFailure(op, "unsupported cmp operand type");
+
+        auto kind = op.getKind();
+        if (kind != P4HIR::CmpOpKind::Eq && kind != P4HIR::CmpOpKind::Ne)
+            return rewriter.notifyMatchFailure(op, "only equality is defined on aggregates");
+
+        auto loc = op.getLoc();
+        auto equal = createEqual(rewriter, loc, type, adaptor.getLhs(), adaptor.getRhs());
+        if (kind == P4HIR::CmpOpKind::Ne) {
+            Value one = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI1Type(), 1);
+            equal = LLVM::XOrOp::create(rewriter, loc, equal, one);
+        }
+        rewriter.replaceOp(op, equal);
         return success();
     }
 };
@@ -918,7 +980,8 @@ void P4::P4MLIR::populateP4HIRToLLVMConversionPatterns(LLVMTypeConverter &conver
                  CastOpConversion, ReadOpConversion, AssignOpConversion, LifetimeEndOpConversion>(
         converter);
     patterns.add<AggregateOpConversion<P4HIR::StructOp>, AggregateOpConversion<P4HIR::ArrayOp>,
-                 StructExtractOpConversion, ArrayGetOpConversion>(converter);
+                 AggregateCmpOpConversion, StructExtractOpConversion, ArrayGetOpConversion>(
+        converter);
     patterns.add<VariableOpConversion, LifetimeStartOpConversion>(converter, initializeVariables);
     patterns.add<StructFieldRefOpConversion, ArrayElementRefOpConversion>(converter);
 }

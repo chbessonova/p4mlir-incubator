@@ -310,3 +310,112 @@ module {
     p4hir.return %r : !b8i
   }
 }
+
+// -----
+
+// Structs are equal if all their fields are, and unequal otherwise.
+
+// CHECK-LABEL: @eq(
+// CHECK-DAG:     %[[A:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.struct<packed (i8, i1)>
+// CHECK-DAG:     %[[B:.*]] = builtin.unrealized_conversion_cast %arg1 : !{{.*}} to !llvm.struct<packed (i8, i1)>
+// CHECK:         %[[A0:.*]] = llvm.extractvalue %[[A]][0] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[B0:.*]] = llvm.extractvalue %[[B]][0] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[EQ0:.*]] = llvm.icmp "eq" %[[A0]], %[[B0]] : i8
+// CHECK-NEXT:    %[[A1:.*]] = llvm.extractvalue %[[A]][1] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[B1:.*]] = llvm.extractvalue %[[B]][1] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[EQ1:.*]] = llvm.icmp "eq" %[[A1]], %[[B1]] : i1
+// CHECK-NEXT:    %[[EQ:.*]] = llvm.and %[[EQ0]], %[[EQ1]] : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[EQ]] : i1 to !{{.*}}
+
+// CHECK-LABEL: @ne(
+// CHECK:         %[[EQ:.*]] = llvm.and %{{.*}}, %{{.*}} : i1
+// CHECK-NEXT:    %[[TRUE:.*]] = llvm.mlir.constant(true) : i1
+// CHECK-NEXT:    %[[NE:.*]] = llvm.xor %[[EQ]], %[[TRUE]] : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[NE]] : i1 to !{{.*}}
+
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"s", x: !b8i, y: !p4hir.bool>
+
+module {
+  p4hir.func @eq(%a : !s, %b : !s) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !s, %b : !s)
+    p4hir.return %eq : !p4hir.bool
+  }
+
+  p4hir.func @ne(%a : !s, %b : !s) -> !p4hir.bool {
+    %ne = p4hir.cmp(ne, %a : !s, %b : !s)
+    p4hir.return %ne : !p4hir.bool
+  }
+}
+
+// -----
+
+// Nested structs, tuples among them, are compared field by field down to the
+// scalars. Empty structs are always equal.
+
+// CHECK-LABEL: @nested_equality(
+// CHECK-DAG:     %[[A:.*]] = builtin.unrealized_conversion_cast %arg0 : !{{.*}} to !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK-DAG:     %[[B:.*]] = builtin.unrealized_conversion_cast %arg1 : !{{.*}} to !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK:         %[[EQ0:.*]] = llvm.icmp "eq" %{{.*}}, %{{.*}} : i32
+// CHECK-NEXT:    %[[AI:.*]] = llvm.extractvalue %[[A]][1] : !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK-NEXT:    %[[BI:.*]] = llvm.extractvalue %[[B]][1] : !llvm.struct<packed (i32, struct<packed (i8, i1)>)>
+// CHECK-NEXT:    %[[AX:.*]] = llvm.extractvalue %[[AI]][0] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[BX:.*]] = llvm.extractvalue %[[BI]][0] : !llvm.struct<packed (i8, i1)>
+// CHECK-NEXT:    %[[EQX:.*]] = llvm.icmp "eq" %[[AX]], %[[BX]] : i8
+// CHECK:         %[[EQY:.*]] = llvm.icmp "eq" %{{.*}}, %{{.*}} : i1
+// CHECK-NEXT:    %[[EQ1:.*]] = llvm.and %[[EQX]], %[[EQY]] : i1
+// CHECK-NEXT:    %[[EQ:.*]] = llvm.and %[[EQ0]], %[[EQ1]] : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[EQ]] : i1 to !{{.*}}
+
+// CHECK-LABEL: @empty_equality(
+// CHECK-NEXT:    %[[TRUE:.*]] = llvm.mlir.constant(true) : i1
+// CHECK-NEXT:    builtin.unrealized_conversion_cast %[[TRUE]] : i1 to !{{.*}}
+
+!b8i = !p4hir.bit<8>
+!b32i = !p4hir.bit<32>
+!tuple = !p4hir.struct<"_tupleToStruct", element_0: !b8i, element_1: !p4hir.bool>
+!outer = !p4hir.struct<"outer", a: !b32i, t: !tuple>
+!empty = !p4hir.struct<"empty">
+
+module {
+  p4hir.func @nested_equality(%a : !outer, %b : !outer) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !outer, %b : !outer)
+    p4hir.return %eq : !p4hir.bool
+  }
+
+  p4hir.func @empty_equality(%a : !empty, %b : !empty) -> !p4hir.bool {
+    %eq = p4hir.cmp(eq, %a : !empty, %b : !empty)
+    p4hir.return %eq : !p4hir.bool
+  }
+}
+
+// -----
+
+// bit<0> fields lower to empty structs. They occupy no storage and always compare
+// equal, including in a nonzero aggregate constant.
+
+!b0i = !p4hir.bit<0>
+!b8i = !p4hir.bit<8>
+!s = !p4hir.struct<"zero_width", z: !b0i, x: !b8i>
+#z = #p4hir.int<0> : !b0i
+#x = #p4hir.int<7> : !b8i
+
+// CHECK-LABEL: @zero_width(
+// CHECK: llvm.alloca %{{.*}} x !llvm.struct<packed (struct<()>, i8)>
+// CHECK: llvm.mlir.zero : !llvm.struct<()>
+// CHECK: llvm.mlir.constant(7 : i8)
+// CHECK: llvm.insertvalue
+// CHECK: llvm.insertvalue
+// CHECK: llvm.mlir.constant(true) : i1
+// CHECK: llvm.icmp "eq" %{{.*}}, %{{.*}} : i8
+// CHECK: llvm.and %{{.*}}, %{{.*}} : i1
+
+module {
+  p4hir.func @zero_width(%a : !s, %b : !s) -> !p4hir.bool {
+    %slot = p4hir.variable ["slot", init] : <!s>
+    %v = p4hir.const #p4hir.aggregate<[#z, #x]> : !s
+    p4hir.assign %v, %slot : <!s>
+    %eq = p4hir.cmp(eq, %a : !s, %b : !s)
+    p4hir.return %eq : !p4hir.bool
+  }
+}
