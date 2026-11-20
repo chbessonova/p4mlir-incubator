@@ -524,12 +524,11 @@ struct ArrayGetOpConversion : public ConvertOpToLLVMPattern<P4HIR::ArrayGetOp> {
     }
 };
 
-// Returns the LLVM constant for the default value of `type`, or null if it has none.
-TypedAttr getDefaultValueAttr(Type type, const TypeConverter &converter) {
+// Returns the converted default value, or null if it cannot be lowered.
+Attribute getDefaultValueAttr(Type type, const TypeConverter &converter) {
     if (auto defaultValueType = dyn_cast<P4HIR::HasDefaultValue>(type))
         if (auto defaultValue = defaultValueType.getDefaultValue())
-            return dyn_cast_if_present<TypedAttr>(
-                converter.convertTypeAttribute(type, defaultValue).value_or(Attribute()));
+            return converter.convertTypeAttribute(type, defaultValue).value_or(Attribute());
     return {};
 }
 
@@ -551,7 +550,7 @@ struct VariableOpConversion : public ConvertOpToLLVMPattern<P4HIR::VariableOp> {
         // A variable with `init` is initialized by its first use. One with a marked lifetime
         // takes its default value where its lifetime starts. The empty struct representing
         // bit<0> holds the only bit<0> value without being stored.
-        TypedAttr defaultValue;
+        Attribute defaultValue;
         if (initializeVariables && !op.getInit() && !P4HIR::isZeroWidth(op.getObjectType()) &&
             llvm::none_of(op->getUsers(), llvm::IsaPred<P4HIR::LifetimeStartOp>)) {
             defaultValue = getDefaultValueAttr(op.getObjectType(), *getTypeConverter());
@@ -561,9 +560,10 @@ struct VariableOpConversion : public ConvertOpToLLVMPattern<P4HIR::VariableOp> {
         auto loc = op.getLoc();
         auto one = LLVM::ConstantOp::create(rewriter, loc, getIndexType(), 1);
         auto alloca = LLVM::AllocaOp::create(rewriter, loc, getPtrType(), objectType, one);
-        if (defaultValue)
-            LLVM::StoreOp::create(rewriter, loc,
-                                  LLVM::ConstantOp::create(rewriter, loc, defaultValue), alloca);
+        if (defaultValue) {
+            auto value = materializeConstant(rewriter, loc, objectType, defaultValue);
+            LLVM::StoreOp::create(rewriter, loc, value, alloca);
+        }
         rewriter.replaceOp(op, alloca);
         return success();
     }
@@ -594,7 +594,7 @@ struct LifetimeStartOpConversion : public ConvertOpToLLVMPattern<P4HIR::Lifetime
         // bit<0> holds the only bit<0> value without being stored.
         auto variable = op.getRef().getDefiningOp<P4HIR::VariableOp>();
         auto objectType = cast<P4HIR::ReferenceType>(op.getRef().getType()).getObjectType();
-        TypedAttr defaultValue;
+        Attribute defaultValue;
         if (initializeVariables && (!variable || !variable.getInit()) &&
             !P4HIR::isZeroWidth(objectType)) {
             defaultValue = getDefaultValueAttr(objectType, *getTypeConverter());
@@ -603,9 +603,10 @@ struct LifetimeStartOpConversion : public ConvertOpToLLVMPattern<P4HIR::Lifetime
 
         auto loc = op.getLoc();
         LLVM::LifetimeStartOp::create(rewriter, loc, *alloca);
-        if (defaultValue)
-            LLVM::StoreOp::create(rewriter, loc,
-                                  LLVM::ConstantOp::create(rewriter, loc, defaultValue), *alloca);
+        if (defaultValue) {
+            auto value = materializeConstant(rewriter, loc, alloca->getElemType(), defaultValue);
+            LLVM::StoreOp::create(rewriter, loc, value, *alloca);
+        }
         rewriter.eraseOp(op);
         return success();
     }
