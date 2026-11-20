@@ -43,30 +43,29 @@ module {
 
 // -----
 
-// `llvm.extractvalue` needs a constant position within the bounds of the array:
-// reads at a dynamic index and at a constant one out of bounds, possibly negative,
-// are left unconverted.
+// Reads at a dynamic index are not lowered, even from an empty array. Neither are
+// reads at a constant position beyond the 32-bit range of `llvm.extractvalue`,
+// which must not be truncated.
 
 // CHECK-LABEL: @get(
 // CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !b32i
 // CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !b32i
-// CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !i8i
+// CHECK:         p4hir.array_get %{{.*}}[%{{.*}}] : !{{.*}}, !b64i
 
 !b8i = !p4hir.bit<8>
 !b32i = !p4hir.bit<32>
-!i8i = !p4hir.int<8>
+!b64i = !p4hir.bit<64>
 !arr = !p4hir.array<2 x !b8i>
+!empty = !p4hir.array<0 x !b8i>
+!large = !p4hir.array<4294967297 x !b8i>
 
 module {
-  p4hir.func @get(%arr : !arr, %i : !b32i) -> !b8i {
+  p4hir.func @get(%arr : !arr, %empty : !empty, %large : !large, %i : !b32i) -> !b8i {
     %dyn = p4hir.array_get %arr[%i] : !arr, !b32i
-    %c2 = p4hir.const #p4hir.int<2> : !b32i
-    %oob = p4hir.array_get %arr[%c2] : !arr, !b32i
-    %cm1 = p4hir.const #p4hir.int<-1> : !i8i
-    %neg = p4hir.array_get %arr[%cm1] : !arr, !i8i
-    %s0 = p4hir.binop(add, %dyn, %oob) : !b8i
-    %s1 = p4hir.binop(add, %s0, %neg) : !b8i
-    p4hir.return %s1 : !b8i
+    %dyn_empty = p4hir.array_get %empty[%i] : !empty, !b32i
+    %pos = p4hir.const #p4hir.int<4294967296> : !b64i
+    %r = p4hir.array_get %large[%pos] : !large, !b64i
+    p4hir.return %r : !b8i
   }
 }
 

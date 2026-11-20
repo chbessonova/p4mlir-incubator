@@ -117,3 +117,31 @@ module {
     p4hir.return
   }
 }
+// -----
+
+// P4 leaves reads at an index out of bounds undefined: constant ones read zero,
+// also from an empty array. A negative index does not wrap around: -1 is not the
+// last element of a 256-element array.
+
+// CHECK-LABEL: @oob(
+// CHECK-NOT:     llvm.extractvalue
+// CHECK:         llvm.mlir.zero : !llvm.struct<packed (i8)>
+// CHECK:         llvm.mlir.zero : !llvm.struct<packed (i8)>
+// CHECK:         llvm.mlir.zero : !llvm.struct<packed (i8)>
+// CHECK-NOT:     llvm.extractvalue
+
+!s = !p4hir.struct<"s", x: !p4hir.bit<8>>
+!arr = !p4hir.array<256 x !s>
+!empty = !p4hir.array<0 x !s>
+
+module {
+  p4hir.func @oob(%a: !arr, %empty: !empty) -> !s {
+    %large = p4hir.const #p4hir.int<18446744073709551616> : !p4hir.bit<128>
+    %neg = p4hir.const #p4hir.int<-1> : !p4hir.int<8>
+    %zero = p4hir.const #p4hir.int<0> : !p4hir.bit<8>
+    %x = p4hir.array_get %a[%large] : !arr, !p4hir.bit<128>
+    %y = p4hir.array_get %a[%neg] : !arr, !p4hir.int<8>
+    %z = p4hir.array_get %empty[%zero] : !empty, !p4hir.bit<8>
+    p4hir.return %z : !s
+  }
+}
