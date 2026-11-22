@@ -133,7 +133,9 @@ def HoistVariables : Pass<"p4hir-hoist-variables"> {
     enclosing allocation scope that is not structured control flow: a function,
     a parser state, a control apply block, etc. Variables declared in scopes,
     branches or loops are thus allocated once per execution of that allocation
-    scope, in the order of their declarations.
+    scope, in the order of their declarations. Variables declared in the entry
+    block move too, so that no other operation precedes them. Variables declared
+    directly in a control or a parser are its locals and stay in place.
 
     The lifetime of a hoisted variable stays with its scope:
     `p4hir.lifetime_start` marks its declaration, where it comes into existence

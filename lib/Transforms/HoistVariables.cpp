@@ -84,7 +84,12 @@ void HoistVariablesPass::runOnOperation() {
         Region *region = getAllocationRegion(op);
         if (!region) return;
         Block *entryBlock = &region->front();
-        if (op->getBlock() != entryBlock) variables.emplace_back(op, entryBlock);
+        Operation *scope = region->getParentOp();
+        if (op->getBlock() == entryBlock &&
+            (!scope->hasTrait<OpTrait::AutomaticAllocationScope>() ||
+             isa<P4HIR::ControlOp, P4HIR::ParserOp>(scope)))
+            return;
+        variables.emplace_back(op, entryBlock);
     });
 
     // Moving every variable before the original first operation of its entry block keeps the
@@ -93,8 +98,12 @@ void HoistVariablesPass::runOnOperation() {
     DominanceInfo dominance(getOperation());
     DenseMap<Block *, Operation *> insertionPoints;
     for (auto [op, entryBlock] : variables) {
-        markLifetime(builder, op, entryBlock->getParent(), dominance);
         auto it = insertionPoints.try_emplace(entryBlock, &entryBlock->front()).first;
+        if (op.getOperation() == it->second) {
+            it->second = op->getNextNode();
+            continue;
+        }
+        markLifetime(builder, op, entryBlock->getParent(), dominance);
         op->moveBefore(it->second);
     }
 }

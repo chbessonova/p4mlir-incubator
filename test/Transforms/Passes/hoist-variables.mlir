@@ -8,18 +8,19 @@
 // Variables declared in nested regions, at any depth, move to the start of the
 // entry block of the function, in the order of their declarations. Their
 // lifetimes start where they were declared and end with their scopes; their
-// initializations stay in place. Variables already in the entry block stay in
-// place, unmarked.
+// initializations stay in place. Variables in the entry block's allocation
+// prefix stay in place, unmarked.
 
 !b8i = !p4hir.bit<8>
 
 // CHECK-LABEL: p4hir.func @f(
+// CHECK-NEXT:    %[[E:.*]] = p4hir.variable ["e"] : <!b8i>
 // CHECK-NEXT:    %[[A:.*]] = p4hir.variable ["a", init] : <!b8i>
 // CHECK-NEXT:    %[[B:.*]] = p4hir.variable ["b"] : <!b8i>
 // CHECK-NEXT:    %[[D:.*]] = p4hir.variable ["d"] : <!b8i>
 // CHECK-NEXT:    %[[C:.*]] = p4hir.variable ["c"] : <!b8i>
 // CHECK-NEXT:    %[[ONE:.*]] = p4hir.const
-// CHECK-NEXT:    %[[E:.*]] = p4hir.variable ["e"] : <!b8i>
+// CHECK-NEXT:    p4hir.lifetime_start %[[E]] : <!b8i>
 // CHECK-NEXT:    p4hir.scope {
 // CHECK-NEXT:      p4hir.lifetime_start %[[A]] : <!b8i>
 // CHECK-NEXT:      p4hir.assign %[[ONE]], %[[A]] : <!b8i>
@@ -145,9 +146,10 @@ module {
 !b8i = !p4hir.bit<8>
 
 // CHECK-LABEL: p4hir.func @loop(
+// CHECK-NEXT:    %[[I:.*]] = p4hir.variable ["i", init] : <!b8i>
 // CHECK-NEXT:    %[[T:.*]] = p4hir.variable ["t", init] : <!b8i>
 // CHECK-NEXT:    %[[ZERO:.*]] = p4hir.const
-// CHECK-NEXT:    %[[I:.*]] = p4hir.variable ["i", init] : <!b8i>
+// CHECK-NEXT:    p4hir.lifetime_start %[[I]] : <!b8i>
 // CHECK-NEXT:    p4hir.assign %[[ZERO]], %[[I]] : <!b8i>
 // CHECK-NEXT:    p4hir.for : cond {
 // CHECK:         } body {
@@ -208,7 +210,7 @@ module {
 
 // In controls and parsers, variables are hoisted to the entry block of their
 // action, apply block or parser state, not to the body of the control or parser.
-// Control-local variables are left in place.
+// Control and parser locals are left in place.
 
 !b8i = !p4hir.bit<8>
 
@@ -246,6 +248,11 @@ module {
 // CHECK-NEXT:        p4hir.lifetime_end %[[S]] : <!b8i>
 // CHECK-NEXT:      }
 // CHECK-NEXT:      p4hir.transition to @accept
+// CHECK:         p4hir.state @reject {
+// CHECK-NEXT:      p4hir.parser_reject
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[PLOCAL:.*]] = p4hir.variable ["plocal"] : <!b8i>
+// CHECK-NEXT:    p4hir.transition to @start
 
 module {
   p4hir.control @c()() {
@@ -283,6 +290,7 @@ module {
     p4hir.state @reject {
       p4hir.parser_reject
     }
+    %plocal = p4hir.variable ["plocal"] : <!b8i>
     p4hir.transition to @start
   }
 }
